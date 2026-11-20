@@ -28,7 +28,7 @@ def convert_mcp_tools(mcp_tools):
             "function": {
                 "name": tool.name,
                 "description": tool.description or "",
-                "parameters": tool.inputSchema
+                "parameters": tool.input_schema
             }
         })
 
@@ -69,7 +69,7 @@ async def main():
                 },
                 {
                     "role": "user",
-                    "content": "What is the status of order 123?"
+                    "content": "Check orders 10 and 20 and tell me their status."
                 }
             ]
 
@@ -113,7 +113,7 @@ async def main():
                         if hasattr(item, "text")
                     )
 
-                    if result.isError:
+                    if result.is_error:
                         result_text = f"Tool execution failed: {result_text}"
 
                     print(f"Tool result: {result_text}")
