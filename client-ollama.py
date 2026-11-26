@@ -7,8 +7,22 @@ import ollama
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+import os
+from dotenv import load_dotenv
+import logging
 
-MODEL = "qwen2.5:3b"
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+)
+
+logger = logging.getLogger("support-ai")
+
+load_dotenv()
+
+MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:3b")
+OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+MAX_TOOL_ITERATIONS = int(os.getenv("MAX_TOOL_ITERATIONS", "5"))
 
 projects_dir = Path("../").resolve()
 
@@ -42,7 +56,7 @@ async def connect_servers(stack, servers):
 
         sessions[name] = session
 
-        print(f"Connected to {name} MCP")
+        logger.info("Connected to %s MCP", name)
 
 
     return sessions
@@ -85,10 +99,15 @@ async def execute_tool(registry, tool_call):
 
     tool_info = registry[exposed_name]
 
-    result = await tool_info["session"].call_tool(
-        tool_info["original_name"],
-        arguments=arguments
-    )
+    try:
+        result = await call_tool_with_retry(
+            tool_info["session"],
+            tool_info["original_name"],
+            arguments
+        )
+
+    except TimeoutError:
+        return "Tool execution failed: Request timed out after 3 attempts."
 
     result_text = "\n".join(
         item.text
@@ -101,10 +120,33 @@ async def execute_tool(registry, tool_call):
 
     return result_text
 
+async def call_tool_with_retry(session, tool_name, arguments):
+
+    for attempt in range(3):
+
+        try:
+            return await asyncio.wait_for(
+                session.call_tool(
+                    tool_name,
+                    arguments=arguments
+                ),
+                timeout=15.0
+            )
+
+        except TimeoutError:
+
+            logger.info("Tool timeout. Attempt {attempt + 1}/3")
+            if attempt == 2:
+                raise
+
+            await asyncio.sleep(1)
 
 async def main():
 
-    ollama_client = ollama.AsyncClient()
+    ollama_client = ollama.AsyncClient(
+        host=OLLAMA_HOST,
+        timeout=30.0
+    )
 
     async with AsyncExitStack() as stack:
 
@@ -114,10 +156,10 @@ async def main():
         # Discover tools from both servers
         available_tools, registry = await collect_tools(sessions)
 
-        print(f"\nDiscovered {len(available_tools)} tools.")
+        logger.info(f"\nDiscovered {len(available_tools)} tools.")
 
         for tool in available_tools:
-            print(f"- {tool['function']['name']}")
+            logger.info(f"- {tool['function']['name']}")
 
         messages = [
             {
@@ -127,7 +169,9 @@ async def main():
                     "Use customer tools for customer information. "
                     "Use support tools for order information. "
                     "Only report information returned by tools. "
-                    "Never invent customer or order information."
+                    "Never invent customer or order information. "
+                    "You must provide valid arguments according to each tool's schema. "
+                    "If a tool returns an error, analyze it and retry with corrected arguments when possible."
                 )
             },
             {
@@ -143,7 +187,7 @@ async def main():
         )
 
         # Tool calling loop
-        for _ in range(5):
+        for _ in range(MAX_TOOL_ITERATIONS):
 
             messages.append(response.message)
 
@@ -154,13 +198,13 @@ async def main():
 
             for tool_call in tool_calls:
 
-                print(
+                logger.info(
                     f"\nCalling: {tool_call.function.name}"
                 )
 
                 result = await execute_tool(registry, tool_call)
 
-                print(f"Result: {result}")
+                logger.info(f"Result: {result}")
 
                 messages.append({
                     "role": "tool",
@@ -174,9 +218,16 @@ async def main():
                 tools=available_tools
             )
 
-        print("\nSupport AI:")
-        print(response.message.content)
+        logger.info("\nSupport AI:")
+        logger.info(response.message.content)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+
+    except KeyboardInterrupt:
+        print("\nApplication interrupted.")
+
+    except Exception:
+        logger.exception("Application stopped due to an unexpected error")
